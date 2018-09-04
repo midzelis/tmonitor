@@ -71,20 +71,88 @@ static const unsigned char logo16_glcd_bmp[] =
 #error("Height incorrect, please fix Adafruit_SSD1306.h!");
 #endif
 
+bool sensorReady = false;
+
 void setup()   {
   Serial.begin(9600);
 
-  delay(5000);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C, FALSE);  // initialize with the I2C addr 0x3D (for the 128x64)
+
   Serial.println(F("BME280 test"));
 
-  bool status;
-  status = bme.begin();
-  if (!status) {
+  sensorReady = bme.begin();
+  if (!sensorReady) {
     Serial.println("Could not find a valid BME280 sensor, check wiring!");
   }
-
+  // bme.setSampling(Adafruit_BME280::MODE_FORCED);
+  bme.setSampling(
+          Adafruit_BME280::MODE_FORCED,
+          Adafruit_BME280::SAMPLING_X16,
+          Adafruit_BME280::SAMPLING_X16,
+          Adafruit_BME280::SAMPLING_X16,
+          Adafruit_BME280::FILTER_OFF);
+  display.clearDisplay();
+  display.display();
 }
 
+const unsigned long PUBLISH_PERIOD_MS = 60000;
+const unsigned long UPDATE_PERIOD_MS = 5001;
+unsigned long lastUpdate = 0;
+char buf[64];
+bool inverted = false;
+unsigned long lastInvert = 0;
+
+unsigned long lastPublish = 0;
+char eventbuf[256];
+const char *FIELD_SEPARATOR = ";";
+const char *EVENT_NAME = "tempSensor";
+
+void displaytemp() {
+  bool doit = false;
+  if (millis() - lastUpdate >= UPDATE_PERIOD_MS) {
+
+    doit = true;
+		lastUpdate = millis();
+    bme.takeForcedMeasurement();
+
+		float temp = bme.readTemperature() - 1.0f; // degrees C
+		float pressure = bme.readPressure() / 100.0; // hPa
+		float humidity = bme.readHumidity(); // %
+
+		display.clearDisplay();
+
+		if (!isnan(temp) && !isnan(humidity)) {
+			display.setTextSize(2);
+			display.setTextColor(WHITE);
+			display.setCursor(0,0);
+
+			snprintf(buf, sizeof(buf), "%.2f C", temp);
+			display.println(buf);
+
+			snprintf(buf, sizeof(buf), "%.2f F", temp * 9.0 / 5.0 + 32.0);
+			display.println(buf);
+
+			snprintf(buf, sizeof(buf), "%.2f %% RH", humidity);
+			display.println(buf);
+
+      printValues();
+      if (millis() - lastPublish >= PUBLISH_PERIOD_MS && sensorReady) {
+		      lastPublish = millis();
+          snprintf(eventbuf, sizeof(eventbuf), "%.02f%s%.02f%s%.02f", temp, FIELD_SEPARATOR, humidity, FIELD_SEPARATOR, pressure);
+		      Particle.publish(EVENT_NAME, eventbuf, PRIVATE);
+      }
+		}
+	}
+  if (millis() - lastInvert >= 30000) {
+    lastInvert = millis();
+    inverted = !inverted;
+    display.invertDisplay(inverted);
+    doit = true;
+  }
+  if (doit) {
+    display.display();
+  }
+}
 void ledtest() {
   // by default, we'll generate the high voltage from the 3.3v line internally! (neat!)
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C, FALSE);  // initialize with the I2C addr 0x3D (for the 128x64)
@@ -187,8 +255,10 @@ void ledtest() {
 }
 
 void loop() {
-    printValues();
-    delay(1000);
+
+
+    displaytemp();
+
 }
 
 
