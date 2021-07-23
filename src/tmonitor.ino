@@ -32,6 +32,8 @@ All text above, and the splash screen must be included in any redistribution
 
 #include "Adafruit_GFX.h"
 #include "Adafruit_SSD1306.h"
+#include "MCP9808.h"
+#include <ClosedCube_SHT31D.h>
 
 #define OLED_RESET D4
 Adafruit_SSD1306 display(OLED_RESET);
@@ -71,83 +73,251 @@ static const unsigned char logo16_glcd_bmp[] =
 #error("Height incorrect, please fix Adafruit_SSD1306.h!");
 #endif
 
+STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));
+uint32_t serial = 0;
+MCP9808 mcp = MCP9808();
+
+SHT31D_CC::ClosedCube_SHT31D sht31d;
 bool sensorReady = false;
 
-void setup()   {
+void doreset() {
+  Serial.println("Resetting");
+  SHT31D_CC::SHT31D_ErrorCode resultSoft = sht31d.softReset();
+  Serial.print("Soft Reset return code: ");
+  Serial.println(resultSoft);
+
+  SHT31D_CC::SHT31D_ErrorCode resultGeneral = sht31d.generalCallReset();
+  Serial.print("General Call Reset return code: ");
+  Serial.println(resultGeneral);
+}
+
+void periodicStart() {
+  // while (sht31d.periodicStart(SHT31D_CC::REPEATABILITY_HIGH, SHT31D_CC::FREQUENCY_10HZ) != SHT31D_CC::NO_ERROR) {
+  //   Serial.println("[ERROR] Cannot start periodic mode");
+  //   display.println("Cannot start periodic mode");
+  //   display.display();
+  //   delay(1000);
+  //   Serial.println("Attempting reset");
+  //
+  //   doreset();
+  // }
+}
+
+void setup() {
   Serial.begin(9600);
 
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C, FALSE);  // initialize with the I2C addr 0x3D (for the 128x64)
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C, FALSE); // initialize with the I2C addr 0x3D (for the 128x64)
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
 
-  Serial.println(F("BME280 test"));
+  display.clearDisplay();
+
+  display.println("init");
+  display.display();
+
+  // delay(5000);
+
+  while (!mcp.begin()) {
+    Serial.println("MCP9808 not found");
+    display.println("MCP9808 NOT found");
+    display.display();
+    delay(500);
+  }
+  display.println("MCP9808 found");
+  display.display();
+  mcp.setResolution(MCP9808_SLOWEST);
 
   sensorReady = bme.begin();
   if (!sensorReady) {
     Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    display.println("BME280 NOT found");
+    display.display();
   }
+  display.println("BME280 found");
+  display.display();
   // bme.setSampling(Adafruit_BME280::MODE_FORCED);
   bme.setSampling(
-          Adafruit_BME280::MODE_FORCED,
-          Adafruit_BME280::SAMPLING_X16,
-          Adafruit_BME280::SAMPLING_X16,
-          Adafruit_BME280::SAMPLING_X16,
-          Adafruit_BME280::FILTER_OFF);
-  display.clearDisplay();
+    Adafruit_BME280::MODE_FORCED,
+    Adafruit_BME280::SAMPLING_X16,
+    Adafruit_BME280::SAMPLING_X16,
+    Adafruit_BME280::SAMPLING_X16,
+    Adafruit_BME280::FILTER_OFF);
+
+  sht31d.begin(0x44);
+
+  serial = sht31d.readSerialNumber();
+  display.print("SHT3x Serial #");
+  display.println(serial);
   display.display();
+
+  periodicStart();
+
+  display.println("done");
+  display.display();
+  delay(500);
 }
 
 const unsigned long PUBLISH_PERIOD_MS = 60000;
-const unsigned long UPDATE_PERIOD_MS = 5001;
-unsigned long lastUpdate = 0;
+const unsigned long UPDATE_PERIOD_MS = 1000;
+unsigned long lastUpdate = millis();
 char buf[64];
 bool inverted = false;
 unsigned long lastInvert = 0;
 
-unsigned long lastPublish = 0;
-char eventbuf[256];
+unsigned long lastPublish = millis();
+char eventbuf[1024];
 const char *FIELD_SEPARATOR = ";";
 const char *EVENT_NAME = "tempSensor";
+
+float celsiusToFahrenheit(float celsius) {
+  return celsius * 9.0 / 5.0 + 32.0;
+}
+
+void printResult(String text, SHT31D_CC::SHT31D result) {
+  if (result.error == SHT31D_CC::NO_ERROR) {
+    Serial.print(text);
+    Serial.print(": T = ");
+    Serial.print(result.t);
+    Serial.print(" *C ");
+    Serial.print(celsiusToFahrenheit(result.t));
+    Serial.println(" *F");
+    Serial.print("Humidity = ");
+    Serial.print(result.rh);
+    Serial.println("%");
+  } else {
+    Serial.print(text);
+    Serial.print(": [ERROR] Code #");
+    Serial.println(result.error);
+
+  }
+}
+
+struct BME_TEMP {
+  float t;
+  float p;
+  float rh;
+  float altitude;
+};
+
+struct MCP_TEMP {
+  float t;
+};
+
+void printValues(BME_TEMP bme_temp, MCP_TEMP mcp_temp, SHT31D_CC::SHT31D sht_temp) {
+
+  Serial.print("Temperature = ");
+  Serial.print(bme_temp.t);
+  Serial.print(" *C ");
+  Serial.print(celsiusToFahrenheit(bme_temp.t));
+  Serial.println(" *F");
+
+  Serial.print("Pressure = ");
+
+  Serial.print(bme_temp.p);
+  Serial.println(" hPa");
+
+  Serial.print("Approx. Altitude = ");
+  Serial.print(bme_temp.altitude);
+  Serial.println(" m");
+
+  Serial.print("Humidity = ");
+  Serial.print(bme_temp.rh);
+  Serial.println(" %");
+
+  Serial.println();
+  Serial.print("sht31d Serial #");
+  Serial.println(serial);
+  printResult("Periodic Mode", sht_temp);
+  Serial.println();
+  Serial.print("MCP Temp: ");
+
+  Serial.print(mcp_temp.t, 4);
+  Serial.print(" *C ");
+  Serial.print(celsiusToFahrenheit(mcp_temp.t));
+  Serial.println(" *F");
+
+  Serial.println();
+}
 
 void displaytemp() {
   bool doit = false;
   if (millis() - lastUpdate >= UPDATE_PERIOD_MS) {
-
+Serial.println("Doing update loop");
     doit = true;
 		lastUpdate = millis();
     bme.takeForcedMeasurement();
-
-		float temp = bme.readTemperature() - 1.0f; // degrees C
-		float pressure = bme.readPressure() / 100.0; // hPa
-		float humidity = bme.readHumidity(); // %
-
+    Serial.print(".");
+    BME_TEMP bme_temp = {
+      bme.readTemperature() - 1.0f,
+      bme.readPressure() / 100.0,
+      bme.readHumidity(),
+      bme.readAltitude(SEALEVELPRESSURE_HPA)
+    };
+    Serial.print(".");
+    // SHT31D_CC::SHT31D sht_temp = sht31d.periodicFetchData();
+    SHT31D_CC::SHT31D sht_temp = sht31d.readTempAndHumidity(SHT31D_CC::REPEATABILITY_HIGH, SHT31D_CC::MODE_CLOCK_STRETCH, 150);
+    Serial.print(".");
+    if (sht_temp.error != SHT31D_CC::NO_ERROR) {
+      sht31d.periodicStop();
+      Serial.print("***");
+      doreset();
+      periodicStart();
+      sht_temp = sht31d.periodicFetchData();
+    }
+    MCP_TEMP mcp_temp = {
+      mcp.getTemperature()
+    };
+    Serial.print(".");
 		display.clearDisplay();
 
-		if (!isnan(temp) && !isnan(humidity)) {
-			display.setTextSize(2);
-			display.setTextColor(WHITE);
-			display.setCursor(0,0);
+    display.setTextSize(2);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
 
-			snprintf(buf, sizeof(buf), "%.2f C", temp);
-			display.println(buf);
+    //snprintf(buf, sizeof(buf), "%.2f C", temp);
+    //display.println(buf);
 
-			snprintf(buf, sizeof(buf), "%.2f F", temp * 9.0 / 5.0 + 32.0);
-			display.println(buf);
+    snprintf(buf, sizeof(buf), "%.2f F", celsiusToFahrenheit(sht_temp.t));
+    display.println(buf);
 
-			snprintf(buf, sizeof(buf), "%.2f %% RH", humidity);
-			display.println(buf);
+    snprintf(buf, sizeof(buf), "%.2f %% RH", sht_temp.rh);
+    display.println(buf);
 
-      printValues();
-      if (millis() - lastPublish >= PUBLISH_PERIOD_MS && sensorReady) {
-		      lastPublish = millis();
-          snprintf(eventbuf, sizeof(eventbuf), "%.02f%s%.02f%s%.02f", temp, FIELD_SEPARATOR, humidity, FIELD_SEPARATOR, pressure);
-		      Particle.publish(EVENT_NAME, eventbuf, PRIVATE);
-      }
-		}
-	}
+    snprintf(buf, sizeof(buf), "%.2f hPa", bme_temp.p);
+    display.println(buf);
+
+    printValues(bme_temp, mcp_temp, sht_temp);
+    // Serial.println(millis());
+    // Serial.println(lastPublish);
+    // Serial.println( millis() - lastPublish);
+    // Serial.println( PUBLISH_PERIOD_MS );
+    // snprintf(eventbuf,
+    //   sizeof(eventbuf), "%.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f",
+    //   bme_temp.t, FIELD_SEPARATOR, bme_temp.rh, FIELD_SEPARATOR, bme_temp.p, FIELD_SEPARATOR,
+    //   mcp_temp.t, FIELD_SEPARATOR, (float)0, FIELD_SEPARATOR, (float)0, FIELD_SEPARATOR,
+    //   sht_temp.t, FIELD_SEPARATOR, sht_temp.rh, FIELD_SEPARATOR, (float)0);
+    // Serial.print("Event: ");
+    // Serial.println(eventbuf);
+    if (millis() - lastPublish >= PUBLISH_PERIOD_MS) {
+      lastPublish = millis();
+      snprintf(eventbuf,
+        sizeof(eventbuf), "%.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f %s %.02f",
+        bme_temp.t, FIELD_SEPARATOR, bme_temp.rh, FIELD_SEPARATOR, bme_temp.p, FIELD_SEPARATOR,
+        mcp_temp.t, FIELD_SEPARATOR, (float) 0, FIELD_SEPARATOR, (float) 0, FIELD_SEPARATOR,
+        sht_temp.t, FIELD_SEPARATOR, sht_temp.rh, FIELD_SEPARATOR, (float) 0);
+      Serial.print("Publishing: ");
+      Serial.println(eventbuf);
+      Particle.publish(EVENT_NAME, eventbuf, PRIVATE);
+    }
+  }
   if (millis() - lastInvert >= 30000) {
+    Serial.print("inverting");
     lastInvert = millis();
     inverted = !inverted;
     display.invertDisplay(inverted);
     doit = true;
+    Serial.print("inverted");
   }
   if (doit) {
     display.display();
@@ -262,26 +432,6 @@ void loop() {
 }
 
 
-void printValues() {
-    Serial.print("Temperature = ");
-    Serial.print(bme.readTemperature());
-    Serial.println(" *C");
-
-    Serial.print("Pressure = ");
-
-    Serial.print(bme.readPressure() / 100.0F);
-    Serial.println(" hPa");
-
-    Serial.print("Approx. Altitude = ");
-    Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
-    Serial.println(" m");
-
-    Serial.print("Humidity = ");
-    Serial.print(bme.readHumidity());
-    Serial.println(" %");
-
-    Serial.println();
-}
 
 
 void testdrawbitmap(const uint8_t *bitmap, uint8_t w, uint8_t h) {
